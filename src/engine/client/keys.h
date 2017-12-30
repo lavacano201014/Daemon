@@ -43,17 +43,21 @@ Maryland 20850 USA.
 #include "framework/ConsoleField.h"
 #include "qcommon/q_unicode.h"
 
-#define MAX_TEAMS 4
-#define DEFAULT_BINDING 0
+namespace Keyboard {
+enum BindTeam {
+    BIND_TEAM_DEFAULT = 0, // Default bind is used if there is no bind set for the player's current team
+    BIND_TEAM_SPECTATORS = 3,
+    NUM_TEAMS
+};
+}
 
 struct qkey_t
 {
     bool down;
     int      repeats; // if > 1, it is autorepeating
-    Util::optional<std::string> binding[ MAX_TEAMS ];
+    Util::optional<std::string> binding[ Keyboard::NUM_TEAMS ];
 };
 
-extern bool key_overstrikeMode;
 extern std::unordered_map<Keyboard::Key, qkey_t, Keyboard::Key::hash> keys;
 
 void            Field_KeyDownEvent(Util::LineEditData& edit, Keyboard::Key key );
@@ -68,14 +72,20 @@ void            Key_ClearStates();
 namespace Keyboard {
 
 void WriteBindings(fileHandle_t f);
+
 void SetBinding(Key key, int team, std::string binding);
-Util::optional<std::string> GetBinding(Key key, int team);
+Util::optional<std::string> GetBinding(Key key, BindTeam team, bool useDefault);
+
+// Gets all keys that, if pressed, would execute the given command, based on the current team.
+std::vector<Key> GetKeysBoundTo(Str::StringRef command);
 
 bool IsDown(Key key);
 bool AnyKeyDown();
 
 void SetTeam(int newTeam);
-int GetTeam();
+
+// Returns the player's current team, which cannot be DEFAULT.
+BindTeam GetTeam();
 
 void BufferDeferredBinds();
 

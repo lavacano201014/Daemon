@@ -43,7 +43,7 @@ key up events are sent even if in console mode
 
 */
 
-bool key_overstrikeMode;
+static bool overstrikeModeOn;
 bool bindingsModified;
 
 static int anykeydown;
@@ -109,7 +109,7 @@ void Field_Draw(const Util::LineEditData& edit, int x, int y, bool showCursor, b
         //Compute the position of the cursor
         float xpos, width, height;
 		xpos = x + SCR_ConsoleFontStringWidth(text.c_str(), cursorPos);
-		height = key_overstrikeMode ? SMALLCHAR_HEIGHT / (CONSOLE_FONT_VPADDING + 1) : 2;
+		height = overstrikeModeOn ? SMALLCHAR_HEIGHT / (CONSOLE_FONT_VPADDING + 1) : 2;
 		width = SMALLCHAR_WIDTH;
 
         re.DrawStretchPic(xpos, y + 2 - height, width, height, 0, 0, 0, 0, cls.whiteShader);
@@ -192,7 +192,7 @@ void Field_KeyDownEvent(Util::LineEditData& edit, Keyboard::Key key) {
             if (keys[ Key(K_SHIFT) ].down) {
                 Field_Paste(edit);
             } else {
-                key_overstrikeMode = !key_overstrikeMode;
+                overstrikeModeOn = !overstrikeModeOn;
             }
             break;
         default:
@@ -258,7 +258,7 @@ void Field_CharEvent(Util::LineEditData& edit, int c )
         return;
     }
 
-    if (key_overstrikeMode) {
+    if (overstrikeModeOn) {
         edit.DeleteNext();
     }
     edit.AddChar(c);
@@ -660,10 +660,7 @@ void CL_KeyEvent( const Keyboard::Key& key, bool down, unsigned time )
 	else
 	{
 		// send the bound action
-		int bindTeam = Keyboard::GetTeam();
-		auto kb = keys[ key ].binding[ bindTeam ]
-		          ? keys[ key ].binding[ bindTeam ] // prefer the team bind
-		          : keys[ key ].binding[ 0 ];       // default to global
+		auto kb = Keyboard::GetBinding( key, Keyboard::GetTeam(), true );
 
 		if ( kb )
 		{

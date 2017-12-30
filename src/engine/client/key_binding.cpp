@@ -45,9 +45,13 @@ using Keyboard::Key;
 
 static int ClipTeamNumber(int team)
 {
-	return Math::Clamp(team, 0, MAX_TEAMS - 1);
+	return Math::Clamp(team, 0, Keyboard::NUM_TEAMS - 1);
 }
 
+static bool IsValidTeamNumber(int team)
+{
+	return team >= 0 && team < Keyboard::NUM_TEAMS;
+}
 
 /*
 ===============
@@ -192,45 +196,45 @@ static int checkKeysDown( modifierMask_t mask )
 
 void CL_ClearKeyBinding()
 {
-	int team;
-
-	for ( team = 0; team < MAX_TEAMS; team++ )
+	for ( auto& kv: keys )
 	{
-		for ( auto& kv: keys )
+		for ( auto& binding: kv.second.binding )
 		{
-			kv.second.binding[ team ] = {};
+			binding = {};
 		}
 	}
 }
 
 namespace Keyboard {
 
-static int bindTeam = DEFAULT_BINDING;
+static BindTeam bindTeam = BIND_TEAM_SPECTATORS; // Should never be BIND_TEAM_DEFAULT
 
 void SetTeam( int newTeam )
 {
-	if ( newTeam < 0 || newTeam >= MAX_TEAMS )
-	{
-		newTeam = DEFAULT_BINDING;
+	BindTeam newBindTeam;
+	if (newTeam > BIND_TEAM_DEFAULT && newTeam < NUM_TEAMS) {
+		newBindTeam = Util::enum_cast<BindTeam>(newTeam);
+	} else {
+		newBindTeam = BIND_TEAM_SPECTATORS;
 	}
 
-	if ( bindTeam != newTeam )
+	if ( bindTeam != newBindTeam )
 	{
 		Log::Debug( "%sSetting binding team index to %d",
 			Color::ToString( Color::Green ),
-			newTeam );
+			Util::ordinal(newBindTeam) );
 	}
 
-	bindTeam = newTeam;
+	bindTeam = newBindTeam;
 }
 
-int GetTeam()
+BindTeam GetTeam()
 {
 	return bindTeam;
 }
 
 // Sets a key binding, or clears it given an empty string.
-// team == -1 clears all bindings for the key, then sets the spec/global binding
+// team == -1 clears all bindings for the key, then sets the default binding
 void SetBinding(Key key, int team, std::string binding)
 {
 	// so name toggle scripts work again: bind x name BzZIfretn?
@@ -245,7 +249,7 @@ void SetBinding(Key key, int team, std::string binding)
 	if ( team == -1 )
 	{
 		// just the team-specific ones here
-		for ( team = MAX_TEAMS - 1; team; --team )
+		for ( team = NUM_TEAMS - 1; team; --team )
 		{
 			keys[ key ].binding[ team ] = {};
 		}
@@ -267,31 +271,39 @@ void SetBinding(Key key, int team, std::string binding)
 	bindingsModified = true;
 }
 
-// -ve team no. = don't return the default binding
-Util::optional<std::string> GetBinding(Key key, int team)
+Util::optional<std::string> GetBinding(Key key, BindTeam team, bool useDefault)
 {
-	if ( !key.IsBindable() )
-	{
+	if (!key.IsBindable() || !IsValidTeamNumber(team)) {
 		return {};
 	}
 	auto it = keys.find(key);
 	if (it == keys.end()) {
 		return {};
 	}
-
-	if ( team <= 0 )
-	{
-		return it->second.binding[ ClipTeamNumber( -team ) ];
-	} else
-	{
-		auto bind = it->second.binding[ ClipTeamNumber( team ) ];
-		if (!bind) {
-			bind = it->second.binding[ 0 ];
-		}
+	const auto& bind = it->second.binding[team];
+	if (!bind && useDefault) {
+		return it->second.binding[BIND_TEAM_DEFAULT];
+	} else {
 		return bind;
 	}
 }
 
+std::vector<Key> GetKeysBoundTo(Str::StringRef command)
+{
+	std::vector<Key> result;
+	for (const auto& key : keys) {
+		for (BindTeam team : {GetTeam(), BIND_TEAM_DEFAULT}) {
+			const auto& binding = key.second.binding[team];
+			if (binding) {
+				if (Str::IsIEqual(command, binding.value())) {
+					result.push_back(key.first);
+				}
+				break;
+			}
+		}
+	}
+	return result;
+}
 
 void WriteBindings( fileHandle_t f )
 {
@@ -300,19 +312,16 @@ void WriteBindings( fileHandle_t f )
 	std::vector<std::string> lines;
 	for (const auto& kv: keys)
 	{
-		if ( kv.second.binding[ 0 ]  )
-		{
-			lines.push_back( Str::Format( "bind       %s %s\n",
-			                              Cmd::Escape( KeyToString( kv.first ) ),
-			                              Cmd::Escape( kv.second.binding[ 0 ].value() ) ) );
-		}
-
-		for ( int team = 1; team < MAX_TEAMS; ++team )
-		{
-			if ( kv.second.binding[ team ] )
-			{
-				lines.push_back( Str::Format( "teambind %d %s %s\n", team, Cmd::Escape( KeyToString( kv.first ) ),
-				    Cmd::Escape( kv.second.binding[ team ].value() ) ) );
+		for (int team = 0; team < NUM_TEAMS; ++team) {
+			if (!kv.second.binding[ team ]) {
+				continue;
+			}
+			std::string escapedKeyName = Cmd::Escape( KeyToString( kv.first ) );
+			std::string escapedBind = Cmd::Escape( kv.second.binding[ team ].value() );
+			if (team == BIND_TEAM_DEFAULT) {
+				lines.push_back( Str::Format( "bind       %s %s\n", escapedKeyName, escapedBind ) );
+			} else {
+				lines.push_back( Str::Format( "teambind %d %s %s\n", team, escapedKeyName, escapedBind ) );
 			}
 		}
 	}
@@ -326,23 +335,14 @@ void WriteBindings( fileHandle_t f )
 namespace { // Key binding commands
 
 // Assumes 'three' teams: spectators, aliens, humans
-static const char *const teamName[] = { "default", "aliens", "humans", "others" };
+static const char *const teamName[] = { "default", "aliens", "humans", "spectators" };
 int GetTeam(Str::StringRef arg)
 {
-	static const struct {
-		char team;
-		char label[11];
-	} labels[] = {
-		{ 0, "spectators" },
-		{ 0, "default" },
-		{ 1, "aliens" },
-		{ 2, "humans" }
-	};
 	int t, l;
 
 	if ( arg.empty() )
 	{
-		goto fail;
+		return -1;
 	}
 
 	for ( t = 0; arg[ t ]; ++t )
@@ -357,26 +357,25 @@ int GetTeam(Str::StringRef arg)
 	{
 		t = atoi( arg.c_str() );
 
-		if ( t != ClipTeamNumber( t ) )
+		if ( !IsValidTeamNumber( t ) )
 		{
 			return -1;
 		}
 
-		return t;
+		return Util::enum_cast<BindTeam>(t);
 	}
 
 	l = arg.size();
 
-	for ( unsigned t = 0; t < ARRAY_LEN( labels ); ++t )
+	for ( unsigned t = 0; t < ARRAY_LEN( teamName ); ++t )
 	{
 		// matching initial substring
-		if ( !Q_strnicmp( arg.c_str(), labels[ t ].label, l ) )
+		if ( !Q_strnicmp( arg.c_str(), teamName[ t ], l ) )
 		{
-			return labels[ t ].team;
+			return t;
 		}
 	}
 
-fail:
 	return -1;
 }
 
@@ -388,7 +387,9 @@ Cmd::CompletionResult CompleteEmbeddedCommand(const Cmd::Args& args, int startIn
 
 void CompleteTeamName(Str::StringRef prefix, Cmd::CompletionResult& completions)
 {
-	Cmd::AddToCompletion(completions, prefix, {{"spectators", ""}, {"default", ""}, {"humans", ""}, {"aliens", ""}});
+	for (const auto& name : teamName) {
+		Cmd::AddToCompletion(completions, prefix, { {name, ""} });
+	}
 }
 
 
@@ -409,6 +410,21 @@ std::string InvalidTeamMessage(Str::StringRef name) {
 	return Str::Format("\"%s\" is not a valid team", name);
 }
 
+// Like KeyToString, but if the key is scancode-based and in the current layout is mapped to
+// a different character than the QWERTY layout one, it also shows that character.
+// Unlike KeyToString it is not a valid representation to use in a command.
+std::string ExtraInfoKeyString(Key key)
+{
+	if (key.kind() == Key::Kind::SCANCODE) {
+		int codePoint = GetCharForScancode(key.AsScancode());
+		// Don't add the parenthetical if it's the same character
+		if (codePoint && codePoint != ScancodeToAscii(key.AsScancode())) {
+			return Str::Format("\"%s\" (%s)", KeyToString(key), CharToString(codePoint));
+		}
+	}
+	return KeyToString(key);
+}
+
 class BindListCmd: public Cmd::StaticCmd
 {
 public:
@@ -422,7 +438,7 @@ public:
 		{
 			bool teamSpecific = false;
 
-			for ( int team = 1; team < MAX_TEAMS; ++team )
+			for ( int team = 1; team < NUM_TEAMS; ++team )
 			{
 				if ( kv.second.binding[ team ] )
 				{
@@ -435,16 +451,16 @@ public:
 			{
 				if ( kv.second.binding[ 0 ] )
 				{
-					Print( "%s = %s", KeyToString( kv.first ), kv.second.binding[ 0 ].value() );
+					Print( "%s = %s", ExtraInfoKeyString( kv.first ), kv.second.binding[ 0 ].value() );
 				}
 			}
 			else
 			{
-				for ( int team = 0; team < MAX_TEAMS; ++team )
+				for ( int team = 0; team < NUM_TEAMS; ++team )
 				{
 					if ( kv.second.binding[ team ] )
 					{
-						Print( "%s[%s] = %s", KeyToString( kv.first ), teamName[ team ], kv.second.binding[ team ].value() );
+						Print( "%s[%s] = %s", ExtraInfoKeyString( kv.first ), teamName[ team ], kv.second.binding[ team ].value() );
 					}
 				}
 			}
@@ -465,11 +481,11 @@ class BindCmd: public Cmd::StaticCmd
 		auto it = keys.find(b);
 		if (it != keys.end()) {
 			const auto& bindings = it->second.binding;
-			for ( int i = 0; i < MAX_TEAMS; ++i )
+			for ( int i = 0; i < NUM_TEAMS; ++i )
 			{
 				if ( teamFilter(i) && bindings[ i ] )
 				{
-					Print( "\"%s\"[%s] = %s", KeyToString(b), teamName[ i ],
+					Print( "\"%s\"[%s] = %s", ExtraInfoKeyString( b ), teamName[ i ],
 					       Cmd_QuoteString( bindings[ i ].value().c_str() ) );
 					bound = true;
 				}
@@ -477,7 +493,7 @@ class BindCmd: public Cmd::StaticCmd
 		}
 		if ( !bound )
 		{
-			Print( "\"%s\" is not bound", KeyToString(b) );
+			Print( "\"%s\" is not bound", ExtraInfoKeyString( b ) );
 		}
 	}
 
@@ -595,12 +611,13 @@ public:
 		else
 		{
 			buf = Str::UTF8To32("/bind ");
+			team = BIND_TEAM_DEFAULT;
 		}
 
 		buf += Str::UTF8To32( Cmd::Escape( KeyToString( k ) ) );
 		buf += Str::UTF8To32(" ");
 
-		auto maybeBinding = GetBinding( k, -team );
+		auto maybeBinding = GetBinding( k, Util::enum_cast<BindTeam>(team), false );
 		if ( maybeBinding )
 		{
 			buf += Str::UTF8To32( Cmd::Escape( maybeBinding.value() ) );
@@ -774,7 +791,7 @@ const ModcaseCmd ModcaseCmdRegistration;
 } // namespace (key binding commands)
 
 /* The SDL subsystem with keyboard functionality ("video") is not initialized when execing configs
-   at startup. We could just initialize that first, but the subystem is also shut down and
+   at startup. We could just initialize that first, but the subsystem is also shut down and
    re-initialized on map changes, etc. and it's hard to prove that a command can't be executed
    during this period. */
 void BufferDeferredBinds()
